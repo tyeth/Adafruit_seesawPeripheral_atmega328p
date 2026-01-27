@@ -233,13 +233,14 @@ void Adafruit_seesawPeripheral_run(void) {
 #endif
 
 #if CONFIG_KEYPAD
-  // Scan keypad periodically - use debounce timing similar to GPIO
-  static uint8_t keypad_scan_cntr = 0;
-  if (keypad_scan_cntr == 0) {
-    Adafruit_seesawPeripheral_keypad_scan();
-    keypad_scan_cntr = 5;  // Scan every 5ms for debouncing
-  } else {
-    keypad_scan_cntr--;
+  // Scan keypad periodically with time-based debouncing
+  {
+    static uint32_t keypad_last_scan = 0;
+    uint32_t keypad_now = millis();
+    if ((keypad_now - keypad_last_scan) >= 5) {  // Scan every 5ms for debouncing
+      Adafruit_seesawPeripheral_keypad_scan();
+      keypad_last_scan = keypad_now;
+    }
   }
 #endif
 

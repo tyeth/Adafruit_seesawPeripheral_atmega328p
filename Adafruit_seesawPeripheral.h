@@ -798,6 +798,10 @@ void Adafruit_seesawPeripheral_write32(uint32_t value) {
 
 // Push an event onto the keypad FIFO
 void Adafruit_seesawPeripheral_keypad_push_event(uint8_t key, uint8_t edge) {
+  // Disable interrupts to prevent race with I2C request handler
+  uint8_t oldSREG = SREG;
+  cli();
+
   if (g_keypad_fifo_count < CONFIG_KEYPAD_FIFO_SIZE) {
     keypadEvent_t evt;
     evt.bit.NUM = key & 0x3F;  // 6 bits for key number
@@ -805,19 +809,21 @@ void Adafruit_seesawPeripheral_keypad_push_event(uint8_t key, uint8_t edge) {
     g_keypad_fifo[g_keypad_fifo_head] = evt;
     g_keypad_fifo_head = (g_keypad_fifo_head + 1) % CONFIG_KEYPAD_FIFO_SIZE;
     g_keypad_fifo_count++;
-
-    SEESAW_DEBUG(F("Key "));
-    SEESAW_DEBUG(key);
-    SEESAW_DEBUG(F(" edge "));
-    SEESAW_DEBUGLN(edge);
-
-    // Trigger interrupt if enabled
-    #if CONFIG_INTERRUPT
-    if (g_keypad_inten) {
-      Adafruit_seesawPeripheral_setIRQ();
-    }
-    #endif
   }
+
+  SREG = oldSREG;  // Restore interrupt state
+
+  SEESAW_DEBUG(F("Key "));
+  SEESAW_DEBUG(key);
+  SEESAW_DEBUG(F(" edge "));
+  SEESAW_DEBUGLN(edge);
+
+  // Trigger interrupt if enabled
+  #if CONFIG_INTERRUPT
+  if (g_keypad_inten) {
+    Adafruit_seesawPeripheral_setIRQ();
+  }
+  #endif
 }
 
 // Scan keypad pins and generate events
