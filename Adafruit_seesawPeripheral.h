@@ -373,8 +373,28 @@ volatile uint8_t g_enc_flags[CONFIG_NUM_ENCODERS];
 
 #if CONFIG_KEYPAD
 
-#ifndef CONFIG_NUM_KEYPAD_KEYS
-#define CONFIG_NUM_KEYPAD_KEYS 16  // Default to 16 keys (4x4 matrix)
+// Matrix keypad support: define CONFIG_KEYPAD_MATRIX, CONFIG_KEYPAD_ROWS,
+// CONFIG_KEYPAD_COLS, and provide CONFIG_KEYPAD_ROW_PINS[] and
+// CONFIG_KEYPAD_COL_PINS[] arrays in your sketch.
+//
+// For direct GPIO keypad (one pin per key): define CONFIG_KEYPAD_PINS[]
+// and CONFIG_NUM_KEYPAD_KEYS instead.
+
+#ifdef CONFIG_KEYPAD_MATRIX
+  // Matrix mode: calculate number of keys from rows * cols
+  #ifndef CONFIG_KEYPAD_ROWS
+    #define CONFIG_KEYPAD_ROWS 4
+  #endif
+  #ifndef CONFIG_KEYPAD_COLS
+    #define CONFIG_KEYPAD_COLS 4
+  #endif
+  #undef CONFIG_NUM_KEYPAD_KEYS
+  #define CONFIG_NUM_KEYPAD_KEYS (CONFIG_KEYPAD_ROWS * CONFIG_KEYPAD_COLS)
+#else
+  // Direct GPIO mode
+  #ifndef CONFIG_NUM_KEYPAD_KEYS
+    #define CONFIG_NUM_KEYPAD_KEYS 16  // Default to 16 keys
+  #endif
 #endif
 
 #ifndef CONFIG_KEYPAD_FIFO_SIZE
@@ -419,6 +439,9 @@ volatile uint8_t g_keypad_inten = 0;
 // Function prototypes
 void Adafruit_seesawPeripheral_keypad_scan(void);
 void Adafruit_seesawPeripheral_keypad_push_event(uint8_t key, uint8_t edge);
+#ifdef CONFIG_KEYPAD_MATRIX
+void Adafruit_seesawPeripheral_keypad_matrix_init(void);
+#endif
 
 #endif // CONFIG_KEYPAD
 
@@ -628,9 +651,11 @@ void Adafruit_seesawPeripheral_reset(void) {
   g_keypad_fifo_count = 0;
   g_keypad_inten = 0;
 
-  // Set up keypad pins as inputs with pullups
-  // User must define CONFIG_KEYPAD_PINS as an array of pin numbers
-  #ifdef CONFIG_KEYPAD_PINS
+  #ifdef CONFIG_KEYPAD_MATRIX
+  // Matrix keypad: set up row pins as outputs (idle HIGH) and col pins as inputs with pullups
+  Adafruit_seesawPeripheral_keypad_matrix_init();
+  #elif defined(CONFIG_KEYPAD_PINS)
+  // Direct GPIO keypad: set up each key pin as input with pullup
   for (uint8_t i = 0; i < CONFIG_NUM_KEYPAD_KEYS; i++) {
     uint8_t pin = CONFIG_KEYPAD_PINS[i];
     if (pin < 32 && (VALID_GPIO & (1UL << pin))) {
@@ -689,6 +714,12 @@ void Adafruit_seesawPeripheral_reset(void) {
 
 #if CONFIG_UART
   CONFIG_UART_SERCOM.begin(g_uart_baud);
+#endif
+
+#if CONFIG_KEYPAD && defined(CONFIG_KEYPAD_MATRIX)
+  // Re-initialize matrix pins at the END of begin() to ensure
+  // they aren't overridden by other GPIO initialization
+  Adafruit_seesawPeripheral_keypad_matrix_init();
 #endif
 
   Wire.begin(_i2c_addr);
@@ -826,10 +857,75 @@ void Adafruit_seesawPeripheral_keypad_push_event(uint8_t key, uint8_t edge) {
   #endif
 }
 
-// Scan keypad pins and generate events
-// Call this from the run() function periodically
+#ifdef CONFIG_KEYPAD_MATRIX
+// Initialize matrix keypad pins
+// Row pins as outputs (idle HIGH), column pins as inputs with pullups
+void Adafruit_seesawPeripheral_keypad_matrix_init(void) {
+  // Set row pins as outputs, idle HIGH
+  for (uint8_t r = 0; r < CONFIG_KEYPAD_ROWS; r++) {
+    uint8_t pin = CONFIG_KEYPAD_ROW_PINS[r];
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, HIGH);
+  }
+  // Set column pins as inputs with pullups
+  for (uint8_t c = 0; c < CONFIG_KEYPAD_COLS; c++) {
+    uint8_t pin = CONFIG_KEYPAD_COL_PINS[c];
+    pinMode(pin, INPUT_PULLUP);
+  }
+}
+
+// Scan matrix keypad and generate events
 void Adafruit_seesawPeripheral_keypad_scan(void) {
-  #ifdef CONFIG_KEYPAD_PINS
+  // Scan each row
+  for (uint8_t r = 0; r < CONFIG_KEYPAD_ROWS; r++) {
+    // Drive this row LOW
+    digitalWrite(CONFIG_KEYPAD_ROW_PINS[r], LOW);
+    delayMicroseconds(10);  // Let signals settle
+
+    // Read each column
+    for (uint8_t c = 0; c < CONFIG_KEYPAD_COLS; c++) {
+      uint8_t keyNum = r * CONFIG_KEYPAD_COLS + c;
+      uint8_t current = (digitalRead(CONFIG_KEYPAD_COL_PINS[c]) == LOW) ? 1 : 0;
+      uint8_t previous = g_keypad_state[keyNum];
+      uint8_t config = g_keypad_edge_config[keyNum];
+
+      // Check for state changes
+      if (current != previous) {
+#if CONFIG_UART_DEBUG
+        SEESAW_DEBUG(F("Key "));
+        SEESAW_DEBUG(keyNum);
+        SEESAW_DEBUG(F(" [R"));
+        SEESAW_DEBUG(r);
+        SEESAW_DEBUG(F("C"));
+        SEESAW_DEBUG(c);
+        SEESAW_DEBUGLN(current ? F("] PRESSED") : F("] RELEASED"));
+#endif
+        if (current && (config & KEYPAD_EDGE_FALLING_EN)) {
+          Adafruit_seesawPeripheral_keypad_push_event(keyNum, KEYPAD_EDGE_FALLING);
+        }
+        if (!current && (config & KEYPAD_EDGE_RISING_EN)) {
+          Adafruit_seesawPeripheral_keypad_push_event(keyNum, KEYPAD_EDGE_RISING);
+        }
+        g_keypad_state[keyNum] = current;
+      }
+
+      // Level events (continuous while in state)
+      if (current && (config & KEYPAD_EDGE_HIGH_EN)) {
+        Adafruit_seesawPeripheral_keypad_push_event(keyNum, KEYPAD_EDGE_HIGH);
+      }
+      if (!current && (config & KEYPAD_EDGE_LOW_EN)) {
+        Adafruit_seesawPeripheral_keypad_push_event(keyNum, KEYPAD_EDGE_LOW);
+      }
+    }
+
+    // Return row to HIGH
+    digitalWrite(CONFIG_KEYPAD_ROW_PINS[r], HIGH);
+  }
+}
+
+#elif defined(CONFIG_KEYPAD_PINS)
+// Scan direct GPIO keypad pins and generate events
+void Adafruit_seesawPeripheral_keypad_scan(void) {
   for (uint8_t i = 0; i < CONFIG_NUM_KEYPAD_KEYS; i++) {
     uint8_t pin = CONFIG_KEYPAD_PINS[i];
     if (pin >= 32 || !(VALID_GPIO & (1UL << pin))) continue;
@@ -861,8 +957,11 @@ void Adafruit_seesawPeripheral_keypad_scan(void) {
       Adafruit_seesawPeripheral_keypad_push_event(i, KEYPAD_EDGE_LOW);
     }
   }
-  #endif
 }
+#else
+// No keypad pins defined - empty scan function
+void Adafruit_seesawPeripheral_keypad_scan(void) {}
+#endif
 
 #endif // CONFIG_KEYPAD
 
